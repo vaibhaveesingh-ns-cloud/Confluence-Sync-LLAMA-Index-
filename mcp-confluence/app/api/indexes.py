@@ -16,6 +16,7 @@ router = APIRouter()
 # Pydantic schemas for request/response
 class IndexCreate(BaseModel):
     name: str
+    agent_id: Optional[str] = None
     confluence_spaces: List[str] = []
     confluence_labels: List[str] = []
     include_attachments: bool = True
@@ -25,6 +26,7 @@ class IndexCreate(BaseModel):
 
 class IndexUpdate(BaseModel):
     name: Optional[str] = None
+    agent_id: Optional[str] = None
     confluence_spaces: Optional[List[str]] = None
     confluence_labels: Optional[List[str]] = None
     include_attachments: Optional[bool] = None
@@ -48,6 +50,7 @@ class SyncConfigResponse(BaseModel):
 class IndexResponse(BaseModel):
     id: int
     name: str
+    agent_id: Optional[str]
     llamacloud_index_id: Optional[str]
     sync_config: Optional[SyncConfigResponse]
 
@@ -71,7 +74,7 @@ class SyncHistoryResponse(BaseModel):
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def create_index_endpoint(
     index_data: IndexCreate,
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """Create a new index with LlamaCloud pipeline"""
@@ -82,6 +85,7 @@ def create_index_endpoint(
         # Create index in database
         db_index = Index(
             user_id=user_id,
+            agent_id=index_data.agent_id,
             name=index_data.name,
             llamacloud_index_id=llamacloud_id
         )
@@ -104,6 +108,7 @@ def create_index_endpoint(
 
         return {
             "id": db_index.id,
+            "agent_id": db_index.agent_id,
             "name": db_index.name,
             "llamacloud_index_id": db_index.llamacloud_index_id,
             "sync_config": {
@@ -125,7 +130,7 @@ def create_index_endpoint(
 
 @router.get("/")
 def list_indexes(
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """List all indexes for a user"""
@@ -136,6 +141,7 @@ def list_indexes(
         sync_config = db.query(SyncConfig).filter(SyncConfig.index_id == idx.id).first()
         result.append({
             "id": idx.id,
+            "agent_id": idx.agent_id,
             "name": idx.name,
             "llamacloud_index_id": idx.llamacloud_index_id,
             "created_at": idx.created_at.isoformat() if idx.created_at else None,
@@ -152,10 +158,44 @@ def list_indexes(
     return {"indexes": result, "total": len(result)}
 
 
+@router.get("/agent/{agent_id}")
+def get_index_by_agent(
+    agent_id: str,
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
+    db: Session = Depends(get_db)
+):
+    """Get index by agent ID"""
+    db_index = db.query(Index).filter(
+        Index.agent_id == agent_id,
+        Index.user_id == user_id
+    ).first()
+
+    if not db_index:
+        raise HTTPException(status_code=404, detail="Index not found for this agent")
+
+    sync_config = db.query(SyncConfig).filter(SyncConfig.index_id == db_index.id).first()
+
+    return {
+        "id": db_index.id,
+        "agent_id": db_index.agent_id,
+        "name": db_index.name,
+        "llamacloud_index_id": db_index.llamacloud_index_id,
+        "created_at": db_index.created_at.isoformat() if db_index.created_at else None,
+        "sync_config": {
+            "interval_minutes": sync_config.interval_minutes if sync_config else 60,
+            "confluence_spaces": sync_config.confluence_spaces or [] if sync_config else [],
+            "confluence_labels": sync_config.confluence_labels or [] if sync_config else [],
+            "include_attachments": sync_config.include_attachments if sync_config else True,
+            "include_comments": sync_config.include_comments if sync_config else False,
+            "enabled": sync_config.enabled if sync_config else False
+        } if sync_config else None
+    }
+
+
 @router.get("/{index_id}")
 def get_index(
     index_id: int,
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """Get a specific index"""
@@ -171,6 +211,7 @@ def get_index(
 
     return {
         "id": db_index.id,
+        "agent_id": db_index.agent_id,
         "name": db_index.name,
         "llamacloud_index_id": db_index.llamacloud_index_id,
         "created_at": db_index.created_at.isoformat() if db_index.created_at else None,
@@ -189,7 +230,7 @@ def get_index(
 def update_index_endpoint(
     index_id: int,
     index_data: IndexUpdate,
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """Update an index"""
@@ -201,9 +242,11 @@ def update_index_endpoint(
     if not db_index:
         raise HTTPException(status_code=404, detail="Index not found")
 
-    # Update index name if provided
+    # Update index fields if provided
     if index_data.name is not None:
         db_index.name = index_data.name
+    if index_data.agent_id is not None:
+        db_index.agent_id = index_data.agent_id
 
     # Update sync config
     sync_config = db.query(SyncConfig).filter(SyncConfig.index_id == index_id).first()
@@ -226,6 +269,7 @@ def update_index_endpoint(
 
     return {
         "id": db_index.id,
+        "agent_id": db_index.agent_id,
         "name": db_index.name,
         "llamacloud_index_id": db_index.llamacloud_index_id,
         "sync_config": {
@@ -242,7 +286,7 @@ def update_index_endpoint(
 @router.delete("/{index_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_index_endpoint(
     index_id: int,
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """Delete an index"""
@@ -268,7 +312,7 @@ def delete_index_endpoint(
 @router.post("/{index_id}/sync")
 def trigger_sync_endpoint(
     index_id: int,
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """Trigger a manual sync for an index"""
@@ -282,10 +326,35 @@ def trigger_sync_endpoint(
         )
 
 
+@router.post("/agent/{agent_id}/sync")
+def trigger_sync_by_agent(
+    agent_id: str,
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
+    db: Session = Depends(get_db)
+):
+    """Trigger sync for an index by agent ID"""
+    db_index = db.query(Index).filter(
+        Index.agent_id == agent_id,
+        Index.user_id == user_id
+    ).first()
+
+    if not db_index:
+        raise HTTPException(status_code=404, detail="Index not found for this agent")
+
+    try:
+        result = sync_index(db, user_id, db_index.id)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 @router.get("/{index_id}/sync-history")
 def get_sync_history_endpoint(
     index_id: int,
-    user_id: int,  # TODO: Get from JWT auth
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     limit: int = 10,
     db: Session = Depends(get_db)
 ):
@@ -325,7 +394,7 @@ class QueryRequest(BaseModel):
 def query_index_endpoint(
     index_id: int,
     request: QueryRequest,
-    user_id: int,
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
     db: Session = Depends(get_db)
 ):
     """Query the index for relevant documents"""
@@ -345,6 +414,37 @@ def query_index_endpoint(
     
     try:
         results = query_index(index.llamacloud_index_id, request.query, request.top_k)
+        return results
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/agent/{agent_id}/query")
+def query_index_by_agent(
+    agent_id: str,
+    request: QueryRequest,
+    user_id: int = 1,  # TODO: Get from JWT auth, default to 1 for testing
+    db: Session = Depends(get_db)
+):
+    """Query index by agent ID"""
+    from app.services.llama_cloud import query_index
+    
+    db_index = db.query(Index).filter(
+        Index.agent_id == agent_id,
+        Index.user_id == user_id
+    ).first()
+    
+    if not db_index:
+        raise HTTPException(status_code=404, detail="Index not found for this agent")
+    
+    if not db_index.llamacloud_index_id:
+        raise HTTPException(status_code=400, detail="Index not synced to LlamaCloud yet")
+    
+    try:
+        results = query_index(db_index.llamacloud_index_id, request.query, request.top_k)
         return results
     except Exception as e:
         raise HTTPException(

@@ -1,211 +1,160 @@
 # MCP Confluence Sync
 
-Sync Confluence pages to LlamaCloud for RAG (Retrieval-Augmented Generation) with LibreChat/Mesh.
+**Hybrid RAG & Sync Solution for LibreChat**
 
-## Quick Start
+This service provides a bridge between Confluence and LibreChat, enabling AI agents to search and retrieve up-to-date documentation. It uses a **Hybrid Architecture** combining robust REST APIs for management with the MCP (Model Context Protocol) for seamless AI tool integration.
+
+## 🚀 Key Features
+
+- **Hybrid Architecture**: 
+  - **REST API**: For index management, syncing, and admin tasks.
+  - **MCP Interface**: Native tool integration for LibreChat/Mesh agents.
+- **Incremental Syncing**: Only syncs new or modified pages (tracks version numbers).
+- **Agent-Based Indexing**: Dedicated indexes per Agent ID (e.g., `agent-123`).
+- **LlamaCloud Integration**: State-of-the-art RAG pipelines using LlamaIndex.
+- **Automatic Background Sync**: Built-in scheduler for periodic updates (configurable interval).
+- **Secure Authentication**: OAuth-ready architecture.
+
+## 🏗️ Architecture
+
+```mermaid
+graph TB
+    User[LibreChat User] --> LC[LibreChat]
+    
+    subgraph "Hybrid Integration"
+    LC -- MCP Protocol /mcp/sse --> HybridService
+    LC -- REST API /api/indexes --> HybridService
+    end
+    
+    subgraph "mcp-confluence Service"
+    HybridService[FastAPI Service]
+    HybridService --> SyncLogic[Sync Service]
+    HybridService --> Scheduler[Background Scheduler]
+    
+    SyncLogic --> Confluence[Confluence Cloud]
+    SyncLogic --> DB[(SQLite Metastore)]
+    SyncLogic --> Llama[LlamaCloud (Vector DB)]
+    end
+```
+
+## 🛠️ Quick Start
 
 ### 1. Prerequisites
+- **Confluence Cloud** account & API Token
+- **LlamaCloud** account & API Key
+- **Docker & Docker Compose**
 
-- Python 3.10+
-- Confluence Cloud account with OAuth app
-- LlamaCloud account with API key
-
-### 2. Setup Confluence OAuth App
-
-1. Go to [Atlassian Developer Console](https://developer.atlassian.com/console/myapps/)
-2. Create a new OAuth 2.0 app
-3. Add the following scopes:
-   - `read:confluence-content.all`
-   - `read:confluence-space.summary`
-   - `offline_access`
-4. Set callback URL: `http://localhost:8001/api/confluence/callback`
-5. Copy Client ID and Client Secret
-
-### 3. Setup LlamaCloud
-
-1. Go to [LlamaCloud](https://cloud.llamaindex.ai/)
-2. Create a project
-3. Get your API key and Project ID
-
-### 4. Install & Configure
-
-```bash
-# Clone and enter directory
-cd mcp-confluence
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your credentials
-```
-
-### 5. Edit `.env` File
+### 2. Configuration (.env)
+Create a `.env` file in `mcp-confluence/` with your credentials:
 
 ```env
-# Required - Confluence OAuth
-CONFLUENCE_CLIENT_ID=your-client-id
-CONFLUENCE_CLIENT_SECRET=your-client-secret
+# Confluence Credentials
+CONFLUENCE_BASE_URL=https://your-domain.atlassian.net
+CONFLUENCE_EMAIL=your-email@example.com
+CONFLUENCE_API_TOKEN=your-api-token
+CONFLUENCE_CLOUD_ID=your-cloud-id (optional)
 
-# Required - LlamaCloud
-LLAMA_CLOUD_API_KEY=your-api-key
+# LlamaCloud Credentials
+LLAMA_CLOUD_API_KEY=llx-your-key
 LLAMA_CLOUD_PROJECT_ID=your-project-id
+# OPENAI_API_KEY=sk-... (Required if creating new LlamaCloud pipelines)
 
-# Optional - Change secret in production
-SECRET_KEY=change-this-in-production
+# Service Settings
+API_PORT=8001
+DEFAULT_SYNC_INTERVAL_MINUTES=60
+DATABASE_URL=sqlite:///./confluence_sync.db
 ```
 
-### 6. Run the Server
+### 3. Run with Docker
+Add to your LibreChat `docker-compose.yml`:
 
-```bash
-# Option 1: Using uvicorn directly
-uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
-
-# Option 2: Using Python
-python -m app.main
+```yaml
+  mcp-confluence:
+    container_name: mcp-confluence
+    build:
+      context: ./mcp-confluence
+    environment:
+      - API_PORT=8001
+    volumes:
+      - ./mcp-confluence/.env:/app/.env
+      - ./mcp-confluence/confluence_sync.db:/app/confluence_sync.db
+    ports:
+      - "8001:8001"
 ```
 
-Server runs at: `http://localhost:8001`
-API docs at: `http://localhost:8001/docs`
+## 🔌 LibreChat Integration
 
----
+### 1. Configure LibreChat (`librechat.yaml`)
 
-## API Usage Flow
+Enable the MCP connection and set strong instructions:
 
-### Step 1: Register User (for testing)
-```bash
-curl -X POST http://localhost:8001/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "testuser", "email": "test@example.com", "password": "password123"}'
+```yaml
+mcpServers:
+  confluence:
+    type: sse
+    url: http://mcp-confluence:8001/mcp/sse
+    timeout: 60000
+    serverInstructions: |
+      You are connected to the internal Confluence Sync system via MCP.
+      CRITICAL INSTRUCTIONS:
+      1. You MUST use `search_confluence` for ANY question about internal projects.
+      2. Do NOT say "I don't have access". You DO have access via these tools.
+      Tools available: `search_confluence`, `get_page`, `list_spaces`.
 ```
 
-### Step 2: Connect Confluence
-```bash
-# Get OAuth URL
-curl "http://localhost:8001/api/confluence/connect?state=1"
-# Visit the returned authorization_url in browser
-```
+### 2. Usage in Chat
+Start a **New Chat** (to load tools) and asking:
+> "Search Confluence for AI Engineer Learning Plan"
 
-### Step 3: Create Index
+## 📡 REST API Reference
+
+The service exposes a full REST API on port `8001`.
+
+### Index Management
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/indexes/` | Create a new index |
+| `GET` | `/api/indexes/` | List all indexes |
+| `PATCH` | `/api/indexes/{id}` | Update config (spaces, interval) |
+| `DELETE` | `/api/indexes/{id}` | Delete index |
+
+### Agent Integration
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/indexes/agent/{agent_id}` | Get index config for a specific Agent ID |
+| `POST` | `/api/indexes/agent/{agent_id}/sync` | Trigger sync for an Agent's index |
+| `POST` | `/api/indexes/agent/{agent_id}/query` | RAG Query via REST (App-to-App) |
+
+### creating an Index Example
 ```bash
-curl -X POST "http://localhost:8001/api/indexes/?user_id=1" \
+curl -X POST http://localhost:8001/api/indexes/ \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "My Confluence Index",
-    "confluence_spaces": ["MYSPACE"],
+    "name": "Engineering Knowledge Base",
+    "agent_id": "dev-agent",
+    "confluence_spaces": ["ENG", "ARCH"],
     "interval_minutes": 60
   }'
 ```
 
-### Step 4: Trigger Sync
-```bash
-curl -X POST "http://localhost:8001/api/indexes/1/sync?user_id=1"
-```
+## 🔄 Sync Logic details
 
-### Step 5: View Sync History
-```bash
-curl "http://localhost:8001/api/indexes/1/sync-history?user_id=1"
-```
+The synchronization process is efficient and incremental:
 
----
+1.  **Scheduled Check**: Runs every 5 minutes (via APScheduler).
+2.  **Versioning**: Checks `confluence_version` of each page against the local database.
+3.  **Extraction**: Downloads new/modified pages as HTML.
+4.  **Conversion**: Converts HTML to Markdown for optimal LLM consumption.
+5.  **Indexing**: Uploads to LlamaCloud Pipeline.
+6.  **Tracking**: Updates `synced_pages` table with new version and timestamp.
 
-## API Endpoints
+## 🐛 Troubleshooting
 
-### Authentication
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/auth/register` | Register user |
-| POST | `/api/auth/login` | Login |
+**"I don't have access" in Chat?**
+- Ensure you started a **New Chat** to refresh the tool context.
+- Verify `mcp-confluence` is running (`docker logs mcp-confluence`).
+- Check if `LLAMA_CLOUD_API_KEY` is valid.
 
-### Confluence OAuth
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/confluence/connect` | Get OAuth URL |
-| GET | `/api/confluence/callback` | OAuth callback |
-| GET | `/api/confluence/status` | Check connection |
-| DELETE | `/api/confluence/disconnect` | Disconnect |
-
-### Indexes & Sync
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/indexes/` | Create index |
-| GET | `/api/indexes/` | List indexes |
-| GET | `/api/indexes/{id}` | Get index |
-| PATCH | `/api/indexes/{id}` | Update index |
-| DELETE | `/api/indexes/{id}` | Delete index |
-| POST | `/api/indexes/{id}/sync` | Trigger sync |
-| GET | `/api/indexes/{id}/sync-history` | View history |
-
----
-
-## Architecture
-
-```
-┌─────────────┐     ┌───────────────────┐     ┌─────────────────┐
-│   Client    │────▶│ mcp-confluence    │────▶│   Confluence    │
-│  (LibreChat)│     │   API (FastAPI)   │     │     Cloud       │
-└─────────────┘     └─────────┬─────────┘     └─────────────────┘
-                              │
-                     ┌────────▼─────────┐
-                     │   LlamaCloud     │
-                     │   (Indexing)     │
-                     └──────────────────┘
-```
-
-### Sync Flow
-1. Fetch pages from configured Confluence spaces
-2. Check page versions for incremental sync
-3. Convert HTML content to Markdown
-4. Upload to LlamaCloud pipeline
-5. Track synced pages in database
-
-### Background Scheduler
-- Checks every 5 minutes for indexes needing sync
-- Respects per-index `interval_minutes` setting
-
----
-
-## Docker
-
-```bash
-docker build -t mcp-confluence .
-docker run -p 8001:8001 --env-file .env mcp-confluence
-```
-
----
-
-## Project Structure
-
-```
-mcp-confluence/
-├── app/
-│   ├── api/
-│   │   ├── auth.py           # User authentication
-│   │   ├── confluence.py     # Confluence OAuth
-│   │   └── indexes.py        # Index CRUD & sync
-│   ├── models/
-│   │   ├── user.py
-│   │   ├── oauth_token.py
-│   │   ├── index.py
-│   │   ├── sync_config.py
-│   │   ├── sync_history.py
-│   │   └── synced_page.py
-│   ├── services/
-│   │   ├── confluence_oauth.py
-│   │   ├── confluence_api.py
-│   │   ├── llama_cloud.py
-│   │   ├── sync_service.py
-│   │   └── scheduler.py
-│   ├── config.py
-│   ├── database.py
-│   └── main.py
-├── requirements.txt
-├── Dockerfile
-├── .env.example
-└── README.md
-```
+**Authentication Errors?**
+- Verify `CONFLUENCE_API_TOKEN` and `CONFLUENCE_EMAIL`.
+- Note: `OPENAI_API_KEY` is required only for creating *new* LlamaCloud pipelines, not for search/retrieval.

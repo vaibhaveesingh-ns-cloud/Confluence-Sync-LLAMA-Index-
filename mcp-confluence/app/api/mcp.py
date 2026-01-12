@@ -11,8 +11,6 @@ import json
 import uuid
 
 from app.services.llama_cloud import query_index
-from app.services import confluence_api
-from app.database import SessionLocal
 import asyncio
 import logging
 from typing import Dict, Any
@@ -169,41 +167,48 @@ def handle_mcp_message(body: dict) -> dict:
             page_id = arguments.get("page_id")
             space_key = arguments.get("space_key")
             
-            db = SessionLocal()
             try:
-                # Default user_id as 1 for system integration
-                user_id = 1
-                
-                if not page_id and title:
-                    logger.info(f"get_page: Finding page by title '{title}'")
-                    pages = confluence_api.find_page_by_title(db, user_id, title, space_key)
-                    if not pages:
-                        return {
-                            "jsonrpc": "2.0",
-                            "id": request_id,
-                            "result": {"content": [{"type": "text", "text": f"No page found with title '{title}'"}]}
-                        }
-                    page_id = pages[0]["id"]
-                
-                if page_id:
-                    logger.info(f"get_page: Fetching page content for ID '{page_id}'")
-                    page_data = confluence_api.get_page_content(db, user_id, page_id)
-                    title = page_data.get("title", "Untitled")
-                    body = page_data.get("body", {}).get("storage", {}).get("value", "No content found.")
-                    
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "content": [{"type": "text", "text": f"# {title}\n\n{body}"}]
-                        }
-                    }
-                else:
+                if not title and not page_id:
                     return {
                         "jsonrpc": "2.0",
                         "id": request_id,
                         "result": {"content": [{"type": "text", "text": "Please provide either a 'title' or 'page_id'."}]}
                     }
+                
+                # Use LlamaCloud to search for the page
+                search_query = title if title else page_id
+                if space_key:
+                    search_query = f"{space_key} {search_query}"
+                
+                logger.info(f"get_page: Searching LlamaCloud for '{search_query}'")
+                results = query_index(CONFLUENCE_PIPELINE_ID, search_query, top_k=5)
+                search_results = results.get("results", [])
+                
+                if not search_results:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"content": [{"type": "text", "text": f"No page found matching '{search_query}'"}]}
+                    }
+                
+                # Return the best match (highest score)
+                best_match = search_results[0]
+                text = best_match.get("text", "")
+                metadata = best_match.get("metadata", {})
+                score = best_match.get("score", 0)
+                filename = metadata.get("filename", "Unknown")
+                
+                logger.info(f"get_page: Found best match '{filename}' with score {score:.2f}")
+                
+                content = f"# {filename}\n\n**Relevance Score:** {score:.2f}\n\n{text}"
+                
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "content": [{"type": "text", "text": content}]
+                    }
+                }
             except Exception as e:
                 logger.error(f"get_page failed: {e}")
                 return {
@@ -211,23 +216,39 @@ def handle_mcp_message(body: dict) -> dict:
                     "id": request_id,
                     "result": {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
                 }
-            finally:
-                db.close()
 
         elif tool_name == "list_spaces":
-            db = SessionLocal()
             try:
-                user_id = 1
-                logger.info("list_spaces: Listing all accessible spaces")
-                spaces = confluence_api.list_spaces(db, user_id)
+                logger.info("list_spaces: Extracting spaces from LlamaCloud index")
                 
-                formatted_spaces = []
-                for space in spaces:
-                    name = space.get("name", "Unknown")
-                    key = space.get("key", "N/A")
-                    formatted_spaces.append(f"- {name} (Key: {key})")
+                # Query LlamaCloud to get a sample of documents
+                results = query_index(CONFLUENCE_PIPELINE_ID, "*", top_k=100)
+                search_results = results.get("results", [])
                 
-                content = "Accessible Confluence Spaces:\n" + "\n".join(formatted_spaces) if formatted_spaces else "No spaces found."
+                # Extract unique space names from filenames
+                # Assuming filename format: SpaceName_PageTitle_PageID.md
+                spaces_set = set()
+                for result in search_results:
+                    metadata = result.get("metadata", {})
+                    filename = metadata.get("filename", "")
+                    
+                    # Extract space name (part before first underscore)
+                    if "_" in filename:
+                        space_name = filename.split("_")[0]
+                        spaces_set.add(space_name)
+                
+                if not spaces_set:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"content": [{"type": "text", "text": "No spaces found in indexed documents."}]}
+                    }
+                
+                formatted_spaces = [f"- {space}" for space in sorted(spaces_set)]
+                content = f"Indexed Confluence Spaces ({len(spaces_set)} found):\n" + "\n".join(formatted_spaces)
+                
+                logger.info(f"list_spaces: Found {len(spaces_set)} unique spaces")
+                
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
@@ -240,8 +261,6 @@ def handle_mcp_message(body: dict) -> dict:
                     "id": request_id,
                     "result": {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
                 }
-            finally:
-                db.close()
         
         return {
             "jsonrpc": "2.0",
