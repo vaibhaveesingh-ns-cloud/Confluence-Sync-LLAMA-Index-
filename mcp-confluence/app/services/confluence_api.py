@@ -16,7 +16,7 @@ def get_confluence_client(db: Session, user_id: int) -> Tuple[httpx.Client, str]
     Returns (client, cloud_id) tuple.
     """
     # First, try API token auth from environment (simpler, no OAuth needed)
-    if config.CONFLUENCE_API_TOKEN and config.CONFLUENCE_CLOUD_ID and config.CONFLUENCE_EMAIL:
+    if config.CONFLUENCE_API_TOKEN and config.CONFLUENCE_BASE_URL and config.CONFLUENCE_EMAIL:
         # Use basic auth with email:api_token
         credentials = f"{config.CONFLUENCE_EMAIL}:{config.CONFLUENCE_API_TOKEN}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
@@ -29,7 +29,7 @@ def get_confluence_client(db: Session, user_id: int) -> Tuple[httpx.Client, str]
             },
             timeout=30.0
         )
-        return client, config.CONFLUENCE_CLOUD_ID
+        return client, config.CONFLUENCE_BASE_URL
     
     # Fall back to OAuth token from database
     token = db.query(ConfluenceOAuthToken).filter(ConfluenceOAuthToken.user_id == user_id).first()
@@ -48,9 +48,44 @@ def get_confluence_client(db: Session, user_id: int) -> Tuple[httpx.Client, str]
     )
 
     return client, token.cloud_id
-def _get_base_url(cloud_id: str) -> str:
-    """Get the API base URL with cloud_id substituted"""
-    return CONFLUENCE_API_BASE.format(cloud_id=cloud_id)
+def _get_base_url(cloud_info: str) -> str:
+    """
+    Get the API base URL.
+    If cloud_info is a URL (direct site access), return the wiki API path for that site.
+    If cloud_info is a UUID (cloud_id), return the OAuth gateway URL.
+    """
+    if cloud_info.startswith("http"):
+        # Direct site access via API token
+        base = cloud_info.rstrip("/")
+        if not base.endswith("/wiki"):
+            base = f"{base}/wiki"
+        return f"{base}/api/v2"
+    
+    # OAuth gateway access
+    return CONFLUENCE_API_BASE.format(cloud_id=cloud_info)
+
+
+def find_page_by_title(db: Session, user_id: int, title: str, space_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Find pages by title, optionally filtered by space_key"""
+    client, cloud_id = get_confluence_client(db, user_id)
+    base_url = _get_base_url(cloud_id)
+    
+    try:
+        params = {"title": title}
+        
+        # If space_key is provided, we need to get space ID first (v2 API requirement)
+        if space_key:
+            space_response = client.get(f"{base_url}/spaces", params={"keys": space_key})
+            space_response.raise_for_status()
+            spaces = space_response.json().get("results", [])
+            if spaces:
+                params["space-id"] = spaces[0]["id"]
+        
+        response = client.get(f"{base_url}/pages", params=params)
+        response.raise_for_status()
+        return response.json().get("results", [])
+    finally:
+        client.close()
 def list_spaces(db: Session, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
     """List all accessible Confluence spaces"""
     client, cloud_id = get_confluence_client(db, user_id)

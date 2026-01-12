@@ -134,7 +134,6 @@ def delete_index(pipeline_id: str) -> bool:
 
     try:
         client.pipelines.delete_pipeline(
-            project_id=config.LLAMA_CLOUD_PROJECT_ID,
             pipeline_id=pipeline_id
         )
         return True
@@ -156,7 +155,6 @@ def get_index_status(pipeline_id: str) -> dict:
 
     try:
         pipeline = client.pipelines.get_pipeline(
-            project_id=config.LLAMA_CLOUD_PROJECT_ID,
             pipeline_id=pipeline_id
         )
 
@@ -190,7 +188,6 @@ def query_index(pipeline_id: str, query: str, top_k: int = 3) -> dict:
 
     try:
         response = client.pipelines.run_search(
-            project_id=config.LLAMA_CLOUD_PROJECT_ID,
             pipeline_id=pipeline_id,
             query=query,
             dense_similarity_top_k=top_k

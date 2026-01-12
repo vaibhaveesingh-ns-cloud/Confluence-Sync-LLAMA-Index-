@@ -11,8 +11,13 @@ import json
 import uuid
 
 from app.services.llama_cloud import query_index
+from app.services import confluence_api
+from app.database import SessionLocal
 import asyncio
+import logging
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -62,7 +67,7 @@ def handle_mcp_message(body: dict) -> dict:
                 "tools": [
                     {
                         "name": "search_confluence",
-                        "description": "Search the Confluence knowledge base for relevant documentation about DevOps, EKS, CI/CD, security, and other technical topics.",
+                        "description": "CRITICAL: Use this tool to search the internal Confluence knowledge base. Use this for ANY questions about DevOps, EKS, CI/CD, security, LlamaIndex, or any internal documentation. If a user provides a Confluence link, search for its title using this tool.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -78,6 +83,35 @@ def handle_mcp_message(body: dict) -> dict:
                             },
                             "required": ["query"]
                         }
+                    },
+                    {
+                        "name": "get_page",
+                        "description": "Get the full content of a specific Confluence page by its title or ID. Use this when you have a specific page in mind or when a user provides a link/title.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "The exact title of the page"
+                                },
+                                "page_id": {
+                                    "type": "string",
+                                    "description": "The unique ID of the page (if known)"
+                                },
+                                "space_key": {
+                                    "type": "string",
+                                    "description": "Optional: The space key to search within (e.g. 'AICore')"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "list_spaces",
+                        "description": "List all accessible Confluence spaces. Use this to understand the organization of the knowledge base.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
                     }
                 ]
             }
@@ -92,10 +126,13 @@ def handle_mcp_message(body: dict) -> dict:
             top_k = arguments.get("top_k", 5)
             
             try:
+                logger.info(f"search_confluence: Searching for '{query}' with top_k={top_k}")
                 results = query_index(CONFLUENCE_PIPELINE_ID, query, top_k)
+                search_results = results.get("results", [])
+                logger.info(f"search_confluence: Found {len(search_results)} results for query: '{query}'")
                 
                 formatted_results = []
-                for i, result in enumerate(results.get("results", []), 1):
+                for i, result in enumerate(search_results, 1):
                     text = result.get("text", "")
                     metadata = result.get("metadata", {})
                     score = result.get("score", 0)
@@ -107,7 +144,7 @@ def handle_mcp_message(body: dict) -> dict:
                         f"{text}\n"
                     )
                 
-                content = "\n---\n".join(formatted_results) if formatted_results else "No results found."
+                content = "\n---\n".join(formatted_results) if formatted_results else "No results found in Confluence for this query."
                 
                 return {
                     "jsonrpc": "2.0",
@@ -117,6 +154,7 @@ def handle_mcp_message(body: dict) -> dict:
                     }
                 }
             except Exception as e:
+                logger.error(f"search_confluence failed: {e}")
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
@@ -125,6 +163,85 @@ def handle_mcp_message(body: dict) -> dict:
                         "isError": True
                     }
                 }
+        
+        elif tool_name == "get_page":
+            title = arguments.get("title")
+            page_id = arguments.get("page_id")
+            space_key = arguments.get("space_key")
+            
+            db = SessionLocal()
+            try:
+                # Default user_id as 1 for system integration
+                user_id = 1
+                
+                if not page_id and title:
+                    logger.info(f"get_page: Finding page by title '{title}'")
+                    pages = confluence_api.find_page_by_title(db, user_id, title, space_key)
+                    if not pages:
+                        return {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {"content": [{"type": "text", "text": f"No page found with title '{title}'"}]}
+                        }
+                    page_id = pages[0]["id"]
+                
+                if page_id:
+                    logger.info(f"get_page: Fetching page content for ID '{page_id}'")
+                    page_data = confluence_api.get_page_content(db, user_id, page_id)
+                    title = page_data.get("title", "Untitled")
+                    body = page_data.get("body", {}).get("storage", {}).get("value", "No content found.")
+                    
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "content": [{"type": "text", "text": f"# {title}\n\n{body}"}]
+                        }
+                    }
+                else:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"content": [{"type": "text", "text": "Please provide either a 'title' or 'page_id'."}]}
+                    }
+            except Exception as e:
+                logger.error(f"get_page failed: {e}")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+                }
+            finally:
+                db.close()
+
+        elif tool_name == "list_spaces":
+            db = SessionLocal()
+            try:
+                user_id = 1
+                logger.info("list_spaces: Listing all accessible spaces")
+                spaces = confluence_api.list_spaces(db, user_id)
+                
+                formatted_spaces = []
+                for space in spaces:
+                    name = space.get("name", "Unknown")
+                    key = space.get("key", "N/A")
+                    formatted_spaces.append(f"- {name} (Key: {key})")
+                
+                content = "Accessible Confluence Spaces:\n" + "\n".join(formatted_spaces) if formatted_spaces else "No spaces found."
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"content": [{"type": "text", "text": content}]}
+                }
+            except Exception as e:
+                logger.error(f"list_spaces failed: {e}")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
+                }
+            finally:
+                db.close()
         
         return {
             "jsonrpc": "2.0",
@@ -157,27 +274,33 @@ async def mcp_sse_get(request: Request, accept: Optional[str] = Header(None)):
     sessions[session_id] = session
     
     async def event_generator():
+        print(f"DEBUG: Starting SSE event generator for session {session_id}")
         try:
             # Correct MCP SSE initial event: MUST be an 'endpoint' event with the POST URL
-            # We include session_id to route POST messages back to this SSE stream
-            yield f"event: endpoint\ndata: /mcp/sse?session_id={session_id}\n\n"
+            # LibreChat expects a plain string URL here
+            endpoint_url = f"/mcp/sse?session_id={session_id}"
+            print(f"DEBUG: Yielding endpoint: {endpoint_url}")
+            yield f"event: endpoint\ndata: {endpoint_url}\n\n"
             
             while not session.disconnected:
                 if await request.is_disconnected():
+                    print(f"DEBUG: Session {session_id} disconnected by client")
                     session.disconnected = True
                     break
                 
                 try:
                     # Wait for messages from the queue
                     message = await asyncio.wait_for(session.queue.get(), timeout=30)
+                    print(f"DEBUG: [SSE -> {session_id}] Sending message: {message.get('method', 'response')}")
                     yield f"event: message\ndata: {json.dumps(message)}\n\n"
                 except asyncio.TimeoutError:
                     # Keep connection alive
                     yield ": keepalive\n\n"
                 except Exception as e:
-                    print(f"Error in SSE generator: {e}")
+                    print(f"DEBUG: Error in SSE generator for {session_id}: {e}")
                     break
         finally:
+            print(f"DEBUG: Cleaning up session {session_id}")
             if session_id in sessions:
                 del sessions[session_id]
             session.disconnected = True
@@ -200,31 +323,37 @@ async def mcp_sse_post(request: Request, session_id: Optional[str] = None):
     Client sends JSON-RPC messages here.
     """
     body = await request.json()
+    method = body.get("method", "response/unknown")
     
-    # Check if this is a notification or response (no response needed)
+    print(f"DEBUG: Received POST for session {session_id}, method: {method}")
+    
+    # 1. Check if this is a notification or response (no response needed via SSE)
     if "method" in body and body.get("id") is None:
-        # This is a notification
+        print(f"DEBUG: Handling notification: {method}")
         handle_mcp_message(body)
         return Response(status_code=202)
     
     if "result" in body or "error" in body:
-        # This is a response from client
+        print(f"DEBUG: Handling client response")
         return Response(status_code=202)
     
-    # Identify the session to send the response to
+    # 2. Identify the session to send the response to
     if not session_id or session_id not in sessions:
-        # If no session, fallback to processing normally but we might lose responsiveness
+        print(f"DEBUG: No session ID {session_id} found in active sessions")
+        # Fallback to direct JSON ONLY if no session
         response = handle_mcp_message(body)
         return JSONResponse(content=response)
     
-    # This is a request - process and send to the session queue
+    # 3. Standard Request: process and send to the session queue
     session = sessions[session_id]
     response = handle_mcp_message(body)
     
     if response:
+        print(f"DEBUG: Queuing response for session {session_id}")
         await session.queue.put(response)
+    else:
+        print(f"DEBUG: No response generated for method {method}")
     
-    # Per MCP spec, return 202 Accepted for SSE transport
     return Response(status_code=202)
 
 
