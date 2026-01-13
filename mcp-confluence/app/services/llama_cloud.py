@@ -33,12 +33,6 @@ def create_index(index_name: str) -> str:
         request={
             "name": index_name,
             "pipeline_type": "MANAGED",
-            "embedding_config": {
-                "type": "OPENAI_EMBEDDING",
-                "component": {
-                    "model_name": "text-embedding-3-small"
-                }
-            },
             "transform_config": {
                 "mode": "auto"
             }
